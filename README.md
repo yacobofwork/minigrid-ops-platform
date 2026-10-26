@@ -1,256 +1,325 @@
 # Mini-Grid O&M Platform
 
-> 一个面向新能源微电网 **运维（O&M）** 场景的可运行监控平台。
-> 一条命令拉起完整数据链路：**采集 → 时序存储 → 可视化/告警 → 自愈 → 备份演练**。
+> An operational monitoring platform for renewable **micro-grid O&M** — bringing up a complete data chain with a single command: **ingest → time-series storage → visualisation & alerting → self-healing → backup drills**.
 
 [![Docker](https://img.shields.io/badge/docker-compose-2496ED?logo=docker&logoColor=white)](https://docs.docker.com/compose/)
 [![TimescaleDB](https://img.shields.io/badge/TimescaleDB-PostgreSQL%2016-FDB515)](https://www.timescale.com/)
 [![Grafana](https://img.shields.io/badge/Grafana-11.1-F46800?logo=grafana&logoColor=white)](https://grafana.com/)
+[![Prometheus](https://img.shields.io/badge/Prometheus-monitoring-E6522C?logo=prometheus&logoColor=white)](https://prometheus.io/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 ---
 
-## 这是什么
+## What this is
 
-一个以真实岗位职责（O&M System Engineer）为蓝本构建的**可运行工程**，覆盖远程运维中心（ROC）的数字骨干：
+A **working engineering implementation** built around the responsibilities of a real O&M System Engineer role, covering the digital backbone of a Remote Operations Centre (ROC).
 
-| 能力 | 实现 | 对应运维职责 |
+> **Status — initial version (v1).** This project was deliberately built against the job description to prove the complete operational flow end to end and to assess what a production deployment would require. Site telemetry is currently **simulated**; the production version will be driven by real site requirements and real device connectivity. The architecture, alert-to-ticket loop and operational discipline carry over unchanged.
+
+| Capability | Implementation | Operational duty |
 |---|---|---|
-| 数据采集 | `collector` 服务，支持模拟器 / Modbus / MQTT | 监控与数据采集平台 |
-| 时序存储 | TimescaleDB（hypertable + 连续聚合 + 压缩 + 保留策略） | 数据质量与存储治理 |
-| 可视化与告警 | Grafana 自动 provision 数据源与看板 | Dashboards & Alarm Management |
-| **双层告警** | Grafana 告警规则（OT 设备层 + IT 平台层）→ 邮件通知 | Alarm Management（P1 响应 KPI） |
-| **工单闭环** | Odoo 18 LTS（Helpdesk / Inventory），告警对应工单 | 库存数据治理 / Helpdesk |
-| 无人值守自愈 | `watchdog` 监测采集心跳并自动重启 | 24/7 平台可用性 |
-| 备份与恢复 | 定时 `pg_dump` + 一键恢复演练脚本 | 备份与恢复（R/A 责任） |
+| Data acquisition | `collector` service — simulator / Modbus / MQTT drivers | Monitoring & data-acquisition platform |
+| Time-series storage | TimescaleDB (hypertable + continuous aggregates + compression + retention) | Data quality and storage governance |
+| Visualisation | Grafana with provisioned datasources and dashboards | Dashboards & alarm management |
+| **Two-line alerting** | 10 provisioned alert rules (OT device layer + IT platform layer) | Alarm management (P1 response KPI) |
+| **Ticket closure** | `odoo-sync` opens Odoo Helpdesk tickets with priority and activity trail | Incident ownership & SLA tracking |
+| Unattended self-healing | `watchdog` monitors ingest heartbeat and restarts the collector | 24/7 platform availability |
+| Backup & restore | Scheduled `pg_dump` + one-command restore drill, status exposed on a dashboard | Backup and restoration (R/A scope) |
+| Secure site access | WireGuard (wg-easy) with per-site keys and QR provisioning | Site connectivity & network segmentation |
 
-**设计原则：低维护、无人值守。** 所有常驻服务配置了 `restart: unless-stopped` 与健康检查；数据库策略（压缩/聚合刷新/保留）全部在初始化时自动注册；Grafana 数据源与看板自动加载。拉起后无需人工干预即可长期运行。
+**Design principle: low maintenance, unattended operation.** All long-running services use `restart: unless-stopped` plus healthchecks; database policies (compression, aggregate refresh, retention) register themselves at initialisation; Grafana datasources, dashboards and alert rules load from files on start. Once up, the platform runs without manual intervention.
 
 ---
 
-## 架构
+## Architecture
 
 ```
-  ┌──────────────── 现场层 (OT) ────────────────┐
-  │  逆变器 / 电表 / BMS                        │
-  │     │ Modbus TCP·RTU / MQTT / OPC-UA        │
-  │     ▼                                       │
-  │  采集服务 (collector)  ← 本地心跳            │
-  └─────────────────┬───────────────────────────┘
-                    │  (真实环境经 WireGuard/IPsec VPN 回传)
+  ┌──────────────── SITE LAYER (OT) ────────────────┐
+  │  Inverters / Meters / BMS                      │
+  │     │ Modbus TCP·RTU / MQTT / OPC-UA           │
+  │     ▼                                          │
+  │  collector  ← heartbeat file                   │
+  └─────────────────┬──────────────────────────────┘
+                    │  (WireGuard tunnel — encrypted)
                     ▼
-  ┌──────────────── ROC (本次实现范围) ─────────────┐
-  │                                                 │
-  │   collector ──▶ TimescaleDB ◀── grafana         │
-  │       ▲              ▲              │           │
-  │       │              │              ▼           │
-  │   watchdog      backup(定时)   看板 + 告警       │
-  │   (自愈)        restore_drill  (告警→工单闭环)   │
-  │                                                 │
-  └─────────────────────────────────────────────────┘
+  ┌──────────────── ROC — OPERATIONS CENTER ──────────────────┐
+  │                                                           │
+  │   collector ──▶ TimescaleDB ◀── grafana                   │
+  │       ▲              ▲              │                     │
+  │       │              │              ▼                     │
+  │   watchdog      backup           dashboards + alerts      │
+  │   (self-heal)   restore_drill    │                        │
+  │                                  ├─▶ SMTP (e-mail)        │
+  │   prometheus ◀─ docker-exporter  └─▶ odoo-sync ─▶ Odoo    │
+  │   blackbox ── TCP/HTTP/TLS probes      (ticket + SLA)     │
+  └───────────────────────────────────────────────────────────┘
 ```
 
-数据流：**采集 → hypertable → 连续聚合 → Grafana 看板/告警 → 事件留痕 → RCA**
+Data path: **acquire → hypertable → continuous aggregates → dashboards & alerts → event record → RCA**
 
 ---
 
-## 快速开始
+## Quick start
 
-### 前置条件
+### Prerequisites
 
-- Docker 20.10+ 与 Docker Compose v2
-- 2 GB 以上可用内存
+- Docker 20.10+ and Docker Compose v2
+- At least 2 GB of available memory
 
-### 一键启动
+### Bring it up
 
 ```bash
-git clone <your-repo-url>
+git clone git@github.com:yacobofwork/minigrid-ops-platform.git
 cd minigrid-ops-platform
-cp .env.example .env      # 按需修改密码
+cp .env.example .env      # then edit passwords and SMTP settings
 docker compose up -d
 ```
 
-或使用 Makefile：
+Or through the Makefile:
 
 ```bash
 make up
 ```
 
-### 访问
+### Endpoints
 
-| 服务 | 地址 | 默认账号 |
+| Service | URL | Credentials |
 |---|---|---|
-| Grafana | http://localhost:3000 | `admin` / `change_me_in_prod` |
-| Odoo（Helpdesk / 库存） | http://localhost:8069 | 首次访问创建数据库，勾选 Helpdesk、Inventory |
+| Grafana | http://localhost:3000 | `admin` / value of `GRAFANA_PASSWORD` in `.env` |
+| Prometheus | http://localhost:9090 | — |
+| WireGuard admin | http://localhost:51821 | value of `WG_PASSWORD` in `.env` |
+| Odoo (optional profile) | http://localhost:8069 | create the database on first visit |
 
-打开 Grafana → 左侧 **Mini-Grid O&M** 文件夹 → **Mini-Grid O&M · 电站监控总览**。
+> `.env` is git-ignored and holds real credentials. Never commit it. `WG_PASSWORD` is mandatory — the compose file fails fast rather than falling back to a default password.
 
-![电站监控总览](docs/dashboard.png)
+### Dashboards
 
-共五块看板：`minigrid_overview`（电站监控总览）、`plant_overview`（电站整体运行 KPI）、`site_devices`（站点设备总览：光伏/储能/柴发/变压器）、`platform_health`（平台数据库层健康：写入速率/数据新鲜度/备份状态）、`host_health`（机器与容器健康：容器 CPU/内存/网络/存活，Prometheus + 自研 Docker exporter）。模拟器每站点模拟 4 类现场设备：PV-01 光伏组件、BAT-01 储能电池、GEN-01 柴油发电机、TR-01 变压器。 另含三块看板：`minigrid_overview`（电站监控总览）、`plant_overview`（电站整体运行 KPI 总览）、`platform_health`（运维平台自身健康：写入速率/数据新鲜度/备份状态/库大小）。
+Open Grafana → **Mini-Grid O&M** folder. Five dashboards ship with the repository:
 
-### 告警（对应 JD 两层告警职责）
+| Dashboard | Purpose |
+|---|---|
+| `minigrid_overview` | Monitoring overview — real-time output per site, cumulative energy, device temperature, data freshness |
+| `plant_overview` | Plant operations — generation now, energy today, battery SOC, devices in fault, recent fault table |
+| `site_devices` | Site devices — PV / battery / genset / transformer detail per device |
+| `platform_health` | Platform health — ingest rate, data freshness per site, backup status and history, database size |
+| `host_health` | Host & containers — per-container CPU / memory / network / uptime, connectivity probes |
 
-告警规则以 provisioning 文件自动加载（`grafana/provisioning/alerting/`），分两层：
+![Monitoring overview](docs/dashboard.png)
 
-| 层 | 规则 | 级别 |
+The simulator models four device classes per site: **PV-01** (solar array), **BAT-01** (battery storage), **GEN-01** (diesel genset) and **TR-01** (transformer).
+
+---
+
+## Alerting
+
+Alert rules are provisioned from `grafana/provisioning/alerting/alert-rules.yml`. There are **10 rules**, deliberately split across two layers.
+
+| Layer | Rule | Severity |
 |---|---|---|
-| OT 设备层 | 站点数据中断 > 2 分钟（监控丢失） | P1 / critical |
-| OT 设备层 | 逆变器故障码（过温等） | P2 / warning |
-| IT 平台层 | 遥测写入速率异常（平台/库不可用） | P2 / warning |
+| OT device | Site data stale — monitoring gap (> 2 min) | **P1** |
+| OT device | Inverter fault code reported | P2 |
+| OT device | Battery SOC below 20% | P2 |
+| IT platform | Connectivity probe failed | **P1** |
+| IT platform | Core container stopped | **P1** |
+| IT platform | Any container stopped | P2 |
+| IT platform | Docker disk usage above 20 GB | P2 |
+| IT platform | HTTP probe unhealthy | P2 |
+| IT platform | Container memory above 80% of host | P3 |
+| IT platform | TLS certificate expiring (< 14 days) | P3 |
 
-告警默认路由到邮件联系点（收件人由 `.env` 的 `ALERT_EMAIL_TO` 配置，默认 `you@example.com`）。
+Severity routing is defined in `policies.yml`: **P1** notifies immediately and repeats every 30 minutes until acknowledged; **P2** waits 5 minutes; **P3** is grouped. Every rule carries a `runbook_url` label, so the notification links straight to the procedure.
 
-**启用邮件通知**：在 `.env` 中填入 SMTP 配置（公司邮箱 / SiteGround 邮箱 / Gmail 应用密码均可）：
+### Enabling e-mail
+
+Fill in the SMTP block in `.env` (any provider works — corporate mailbox, transactional service or a Gmail app password):
 
 ```bash
 SMTP_ENABLED=true
-SMTP_HOST=mail.example.com:587
+SMTP_HOST=smtp.example.com:587
 SMTP_USER=you@example.com
-SMTP_PASSWORD=你的密码
+SMTP_PASSWORD=your_app_password
 SMTP_FROM=you@example.com
+ALERT_EMAIL_TO=oncall@example.com
 ```
 
-改完执行 `docker compose restart grafana` 生效。未配置 SMTP 时告警照常触发，仅邮件发送失败（Grafana 日志可见）。
+Then `docker compose restart grafana`. Without SMTP configured, alerts still fire and appear in Grafana — only delivery fails (visible in the Grafana log).
 
-### 验证数据在流动
+### Enabling Odoo tickets
 
 ```bash
-# 查看采集服务日志
+ODOO_URL=https://your-instance.odoo.com
+ODOO_DB=your-db
+ODOO_EMAIL=you@example.com
+ODOO_API_KEY=your_api_key
+ODOO_TEAM=Mini-Grid O&M
+SYNC_INTERVAL_SEC=60
+```
+
+`odoo-sync` polls firing alerts every 60 seconds and creates a Helpdesk ticket carrying the severity in the title, the alert payload in the description, and an owner — so a notice becomes a tracked task.
+
+### Verifying data flow
+
+```bash
+# Collector log
 docker compose logs -f collector
 
-# 查询最新遥测
+# Latest telemetry
 docker compose exec -T timescaledb \
   psql -U ops -d minigrid -c \
   "SELECT site_id, count(*), round(max(power_kw)::numeric,2) AS max_kw FROM telemetry GROUP BY site_id;"
 ```
 
-约 1 分钟内即可看到每个站点持续增长的记录数。
+Record counts per site start increasing within about a minute.
 
 ---
 
-## 常用命令
+## Common commands
 
 ```bash
-make help              # 查看所有命令
-make up                # 启动整个平台
-make ps                # 查看服务状态
-make health            # 检查健康状态
-make logs              # 实时日志
-make backup-restore-test   # 执行一次备份恢复演练
-make down              # 停止（保留数据）
-make clean             # 停止并清空数据（危险）
+make help                  # list all targets
+make up                    # start the platform
+make ps                    # service status
+make health                # healthcheck summary
+make logs                  # follow logs
+make backup-restore-test   # run one backup/restore drill
+make down                  # stop (data preserved)
+make clean                 # stop and wipe data (destructive)
 ```
 
 ---
 
-## 核心自动化
+## Core automation
 
-### 1. 无人值守自愈（watchdog）
+### 1. Unattended self-healing (watchdog)
 
-`watchdog` 每 30 秒检查采集服务的心跳文件。若心跳超过 `HEARTBEAT_MAX_AGE_SEC`（默认 90 秒）未更新，连续两次即判定异常，通过 Docker API 自动重启采集服务，并推送 P1 告警。
+`watchdog` checks the collector heartbeat file every 30 seconds. If the heartbeat is older than `HEARTBEAT_MAX_AGE_SEC` (default 90 s) on two consecutive checks, it restarts the collector through the Docker API and raises a P1 alert.
 
-**验证方法：**
+**Try it:**
 
 ```bash
-docker stop mog-collector        # 模拟采集服务挂掉
-# 等待约 2 分钟
-docker logs mog-watchdog         # 可见"心跳过期 → 触发自动重启"日志
-docker compose ps collector      # 已自动恢复 running (healthy)
+docker stop mog-collector         # simulate a collector crash
+# wait ~2 minutes
+docker logs mog-watchdog          # "heartbeat expired → restart" entries
+docker compose ps collector       # back to running (healthy)
 ```
 
-若一小时内反复重启（≥5 次），watchdog 会升级为"疑似持续性故障，需人工介入"告警，避免重启风暴。
+If restarts exceed five within an hour, the watchdog escalates to *suspected persistent failure — manual intervention required* instead of looping.
 
-### 2. 定时备份与恢复演练
+> **Note for drills:** to observe a *monitoring-gap alert*, stop the watchdog **first**, then the collector. Otherwise self-healing restores the collector within 60 seconds and the alert never fires — which is the system working as designed.
 
-`backup` 服务每 `BACKUP_INTERVAL_HOURS` 小时执行一次 `pg_dump`，并按 `BACKUP_RETENTION_DAYS` 自动轮转清理，日志写入备份卷的 `backup.log`。
+### 2. Scheduled backup and restore drill
 
-恢复演练一键执行：
+The `backup` service runs `pg_dump` every `BACKUP_INTERVAL_HOURS`, rotates files by `BACKUP_RETENTION_DAYS`, and writes `backup.log` to the backup volume. Dashboard panels read that history, so the measure is **when the last backup succeeded**, not whether a file exists.
+
+Run a drill with one command:
 
 ```bash
 make backup-restore-test
 ```
 
-脚本流程：备份 → 记录源库数据量 → 恢复到临时库 → 校验一致性 → 清理 → 输出报告。
+The script backs up, records source row counts, restores into a temporary database, verifies consistency, cleans up and prints a report.
 
-> **实战经验（已内置到脚本）**：TimescaleDB 恢复必须先调用 `timescaledb_pre_restore()`，恢复后调用 `timescaledb_post_restore()`。若跳过这两步，时序内部表无法重新挂载到 hypertable，恢复后主表查询为 0 行。本项目的演练脚本已按官方流程处理 —— 这个坑正是"演练"存在的意义。
+> **Lesson baked into the script:** TimescaleDB restores must call `timescaledb_pre_restore()` before and `timescaledb_post_restore()` after the restore. Skip them and the internal time-series tables never reattach to the hypertable — the restore "succeeds" but main-table queries return zero rows. The drill script follows the official sequence; this is exactly why drills exist.
 
 ---
 
-## 项目结构
+## Project structure
 
 ```
 minigrid-ops-platform/
-├── docker-compose.yml              # 服务编排（5 个服务 + 健康检查 + 自愈）
-├── Makefile                        # 常用运维命令
-├── .env.example                    # 环境变量模板
-├── db/init/01_schema.sql           # 时序建模：hypertable/聚合/压缩/保留
+├── docker-compose.yml              # 10 services, healthchecks, two networks
+├── Makefile                        # day-to-day operations
+├── .env.example                    # environment template (safe to commit)
+├── db/
+│   ├── init/01_schema.sql          # hypertable, aggregates, compression, retention
+│   └── migrate_001_energy_delta.sql# migration for existing deployments
 ├── services/
-│   ├── collector/                  # 数据采集服务（采集 → 入库 + 心跳）
+│   ├── collector/                  # ingest → database, heartbeat
 │   │   ├── collector.py
-│   │   ├── sources.py              # 数据源抽象：simulator/modbus/mqtt
+│   │   ├── sources.py              # simulator / modbus / mqtt abstraction
 │   │   └── Dockerfile
-│   └── watchdog/                   # 看门狗（监测心跳并自愈）
-│       ├── watchdog.py
-│       └── Dockerfile
+│   ├── watchdog/                   # heartbeat monitor + self-healing
+│   ├── docker_exporter/            # custom exporter, parallel container stats
+│   └── odoo_sync/                  # alert → Odoo Helpdesk bridge
 ├── grafana/
-│   ├── provisioning/               # 数据源 + 看板自动加载
-│   └── dashboards/                 # 预置监控看板 JSON
+│   ├── provisioning/               # datasources, alerting, dashboard provider
+│   └── dashboards/                 # five dashboard JSON files
+├── prometheus/prometheus.yml       # scrape config, blackbox jobs
+├── monitoring/blackbox.yml         # TCP / HTTP / TLS probe modules
 ├── scripts/
-│   ├── backup_loop.sh              # 定时备份循环
-│   └── restore_drill.sh            # 备份恢复演练
-└── runbooks/                       # 运维手册（见下）
+│   ├── backup_loop.sh
+│   ├── restore_drill.sh
+│   └── odoo_push.py
+└── runbooks/                       # operational procedures
 ```
 
 ---
 
-## 运维手册（Runbooks）
+## Runbooks
 
-对应岗位要求的"维护成文的运行手册"，本仓库附带：
+Every alert links to one of these written procedures:
 
-| Runbook | 用途 |
+| Runbook | Purpose |
 |---|---|
-| [服务器重建](runbooks/server-rebuild.md) | 服务器故障后从零恢复平台 |
-| [VPN 恢复](runbooks/vpn-recovery.md) | 站点连接中断的排查与恢复 |
-| [数据恢复](runbooks/data-restore.md) | 数据库损坏/误删后的恢复流程 |
-| [事件响应](runbooks/incident-response.md) | P1 事件按 NIST SP 800-61 六阶段处置 |
-| [平台接入真实设备](runbooks/connect-real-device.md) | 从模拟器切换到 Modbus/MQTT 真实设备 |
+| [Server rebuild](runbooks/server-rebuild.md) | Recover the platform from scratch after host loss |
+| [VPN recovery](runbooks/vpn-recovery.md) | Diagnose and restore site connectivity |
+| [Data restore](runbooks/data-restore.md) | Recovery after database corruption or accidental deletion |
+| [Incident response](runbooks/incident-response.md) | P1 handling following the six NIST SP 800-61 phases |
+| [Connect a real device](runbooks/connect-real-device.md) | Move from simulator to Modbus / MQTT devices |
 
 ---
 
-## 技术栈
+## Technology stack
 
-- **TimescaleDB** (PostgreSQL 16) — 时序存储、连续聚合、压缩、保留策略
-- **Grafana 11** — 可视化、告警、自动 provisioning
-- **Python 3.11** — 采集服务与看门狗
-- **Docker Compose** — 编排、健康检查、自愈
+- **TimescaleDB** (PostgreSQL 16) — time-series storage, continuous aggregates, compression, retention
+- **Grafana 11** — dashboards, alerting, file-based provisioning
+- **Prometheus + Alertmanager** — metrics collection and severity routing
+- **blackbox_exporter** — TCP, HTTP and TLS-certificate probes
+- **Python 3.11** — collector, watchdog, docker-exporter, odoo-sync
+- **WireGuard (wg-easy)** — encrypted site access with per-site keys
+- **Docker Compose** — orchestration, healthchecks, self-healing
 
 ---
 
-## 验证记录
+## Verification record
 
-本项目已在本机完整验证，以下为实测结果：
+Measured on the reference deployment:
 
-| 验证项 | 结果 |
+| Item | Result |
 |---|---|
-| 一键启动 5 个服务 | ✅ 全部 `Up`，collector/grafana/timescaledb 为 `healthy` |
-| 数据链路 | ✅ 3 个站点遥测持续写入 TimescaleDB |
-| 时序建模 | ✅ hypertable + 2 个连续聚合 + 压缩/保留策略全部注册 |
-| Grafana 自动配置 | ✅ 数据源与 8 面板看板自动加载，显示实时曲线 |
-| 看门狗自愈 | ✅ 停止采集服务后 120s 内自动检测并重启恢复 |
-| 备份恢复演练 | ✅ `PASS`，数据零丢失 |
+| Bring-up of 10 services | All `Up`; timescaledb, grafana and collector `healthy` |
+| Data flow | Three sites writing continuously; ~144 rows/min steady state |
+| Time-series modelling | Hypertable + 2 continuous aggregates + compression and retention registered |
+| Grafana provisioning | 5 dashboards and 10 alert rules loaded automatically from files |
+| Data freshness | 2–5 s end to end |
+| Watchdog self-healing | Collector restored within 120 s of being stopped |
+| Backup & restore drill | `PASS`, zero data loss |
+| Alert-to-ticket | P2 inverter-fault alert created an Odoo ticket, assigned and solved |
+
+### A correctness fix worth noting
+
+Two units were originally conflated: `power_kw` is an instantaneous **gauge** while `energy_kwh` is a cumulative **counter**. Summing a gauge across rows inflated 20 kW into 240 kW; summing a counter produced implausible megawatt-hour totals. The fix sums the **latest value per device** for power, and uses `MAX − MIN` window deltas for energy — in the dashboards and inside the continuous aggregates.
 
 ---
 
-## 后续可扩展方向
+## Extending the platform
 
-- [ ] 接入真实逆变器（`sources.py` 已预留 Modbus / MQTT 骨架）
-- [ ] 告警对接 Odoo Helpdesk，实现告警 → 工单自动创建
-- [ ] 增加 Prometheus + node_exporter 主机层监控
-- [ ] 引入 Suricata / Wazuh 做 IDS 与日志审计
-- [ ] 按 IEC 62443 分区+导管完善网络分段文档
-- [ ] 迁移到自建服务器并补充 Ansible 部署剧本
+- [ ] Connect real inverters and meters (`sources.py` already provides the Modbus / MQTT skeleton)
+- [ ] Add host-level monitoring with `node_exporter`
+- [ ] Introduce Suricata or Wazuh for IDS and log auditing
+- [ ] Complete IEC 62443 zone-and-conduit documentation for site and ROC networks
+- [ ] Automate provisioning with Ansible for the in-house server migration
+- [ ] Replace the energy counter with incremental reporting so restarts no longer reset daily totals
+
+---
+
+## Known limitations (v1)
+
+- Site telemetry is **simulated**; no real device has been integrated yet.
+- Energy counters reset when the collector restarts, which under-reports "energy today" after a restart.
+- Alert thresholds are derived from operating logic, not yet tuned against real baselines.
+- Security hardening is modelled (zoning, VPN, least privilege) but firewall/IDS and image scanning are not yet in place.
 
 ## License
 
-MIT — 见 [LICENSE](LICENSE)
+MIT — see [LICENSE](LICENSE)
