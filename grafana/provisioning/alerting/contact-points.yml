@@ -1,0 +1,16 @@
+# =============================================================================
+# Mini-Grid O&M — 告警通知联系方式
+# 收件人：运维工程师邮箱（对应 JD 告警管理职责）
+# =============================================================================
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: minigrid-email
+    receivers:
+      - uid: minigrid-email-receiver
+        type: email
+        settings:
+          addresses: ${ALERT_EMAIL_TO}
+          subject: "[Mini-Grid O&M] {{ .Status }}: {{ (index .Alerts 0).Labels.alertname }}"
+        disableResolveMessage: false

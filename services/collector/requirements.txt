@@ -1,0 +1,4 @@
+psycopg2-binary==2.9.9
+# 接入真实设备时按需启用：
+# pymodbus==3.6.8
+# paho-mqtt==2.1.0

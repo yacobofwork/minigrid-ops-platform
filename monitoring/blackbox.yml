@@ -1,0 +1,23 @@
+# =============================================================================
+# Blackbox 探测配置 — 站点/平台连通性监控
+# 对应 JD：monitor platform and site-connectivity health
+#
+# 两个模块互补（黑盒双层）：
+#   tcp_connect —— TCP 握手探测：证明"端口/链路开着"（链路层）
+#   http_2xx    —— 真实 HTTP 请求：证明"应用活着"（应用层），附带 TLS 证书指标
+#   probe_ssl_earliest_cert_expiry（http 模块自动带出）→ 证书过期预警
+# =============================================================================
+modules:
+  tcp_connect:
+    prober: tcp
+    timeout: 5s
+    tcp:
+      preferred_ip_protocol: ip4
+
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      preferred_ip_protocol: ip4
+      valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+      follow_redirects: true

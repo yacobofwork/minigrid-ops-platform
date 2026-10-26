@@ -1,0 +1,352 @@
+# =============================================================================
+# Mini-Grid O&M Platform — Docker Compose
+# -----------------------------------------------------------------------------
+# 一键部署整条 O&M 数据链路：
+#   采集(collector) -> 时序库(timescaledb) -> 可视化/告警(grafana)
+#   + watchdog(自愈) + backup(定时备份)
+#
+# 所有常驻服务均配置 restart: unless-stopped + healthcheck，
+# 拉起后无需人工干预即可长期无人值守运行。
+#
+#   启动: docker compose up -d
+#   停止: docker compose down
+#   状态: docker compose ps
+# =============================================================================
+
+name: minigrid-ops
+
+services:
+  # ---------------------------------------------------------------------------
+  # 时序数据库：TimescaleDB (PostgreSQL + 时序扩展)
+  # 角色：存储电站遥测数据，供 Grafana 查询
+  # ---------------------------------------------------------------------------
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: mog-timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_prod}
+      POSTGRES_DB: ${POSTGRES_DB:-minigrid}
+      # 时序库推荐参数
+      TZ: ${TZ:-Africa/Lagos}
+    volumes:
+      - tsdb_data:/var/lib/postgresql/data
+      # 首次启动自动执行，完成时序建模（hypertable / 连续聚合 / 保留策略）
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${TSDB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ops} -d ${POSTGRES_DB:-minigrid}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - mog_net
+
+  # ---------------------------------------------------------------------------
+  # 数据采集服务：模拟/真实逆变器采集，写入 TimescaleDB
+  # 角色：扮演"边缘采集服务"，对应 JD 中的数据采集平台
+  # ---------------------------------------------------------------------------
+  collector:
+    build:
+      context: ./services/collector
+      dockerfile: Dockerfile
+    container_name: mog-collector
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-minigrid}
+      DB_USER: ${POSTGRES_USER:-ops}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_prod}
+      # 数据源 driver: simulator(默认) | modbus | mqtt
+      SOURCE_DRIVER: ${SOURCE_DRIVER:-simulator}
+      SITES: ${SITES:-SITE-01,SITE-02,SITE-03}
+      POLL_INTERVAL_SEC: ${POLL_INTERVAL_SEC:-5}
+      TZ: ${TZ:-Africa/Lagos}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      # 心跳文件：供 watchdog 读取，实现采集服务自愈
+      - collector_hb:/var/run/collector
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time,sys; f='/var/run/collector/heartbeat'; sys.exit(0 if os.path.exists(f) and time.time()-os.path.getmtime(f) < 60 else 1)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - mog_net
+
+  # ---------------------------------------------------------------------------
+  # 看门狗：监测采集服务心跳，异常时自动重启，实现无人值守自愈
+  # ---------------------------------------------------------------------------
+  watchdog:
+    build:
+      context: ./services/watchdog
+      dockerfile: Dockerfile
+    container_name: mog-watchdog
+    restart: unless-stopped
+    depends_on:
+      - collector
+    environment:
+      TARGET_CONTAINER: mog-collector
+      HEARTBEAT_FILE: /var/run/collector/heartbeat
+      HEARTBEAT_MAX_AGE_SEC: ${HEARTBEAT_MAX_AGE_SEC:-90}
+      CHECK_INTERVAL_SEC: ${CHECK_INTERVAL_SEC:-30}
+      WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      TZ: ${TZ:-Africa/Lagos}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - collector_hb:/var/run/collector:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - mog_net
+
+  # ---------------------------------------------------------------------------
+  # 可视化与告警：Grafana
+  # 角色：连接 TimescaleDB，展示看板，运行告警规则
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: mog-grafana
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-change_me_in_prod}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # 告警使用统一告警引擎
+      GF_UNIFIED_ALERTING_ENABLED: "true"
+      # 告警邮件（SMTP 由 .env 提供，未配置时告警仍会触发但邮件发送会失败）
+      GF_SMTP_ENABLED: ${SMTP_ENABLED:-false}
+      GF_SMTP_HOST: ${SMTP_HOST:-}
+      GF_SMTP_USER: ${SMTP_USER:-}
+      GF_SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      GF_SMTP_FROM_ADDRESS: ${SMTP_FROM:-minigrid-ops@saba.energy}
+      GF_SMTP_FROM_NAME: Mini-Grid O&M Alerts
+      GF_SMTP_SKIP_VERIFY: ${SMTP_SKIP_VERIFY:-false}
+      DB_HOST: timescaledb
+      DB_NAME: ${POSTGRES_DB:-minigrid}
+      DB_USER: ${POSTGRES_USER:-ops}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-change_me_in_prod}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
+      TZ: ${TZ:-Africa/Lagos}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      # 自动 provisioning：数据源 + 看板，免手工配置
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - mog_net
+
+  # ---------------------------------------------------------------------------
+  # Odoo 告警同步：自动把 Grafana firing 告警推送为 Odoo 工单（告警→工单闭环）
+  # 支持 Odoo Online 企业版(Helpdesk) 与本地社区版(Project 任务自动回退)
+  # 未配置 ODOO_API_KEY 时静默待机，不影响其他服务
+  # ---------------------------------------------------------------------------
+  odoo-sync:
+    build:
+      context: ./services/odoo_sync
+      dockerfile: Dockerfile
+    container_name: mog-odoo-sync
+    restart: unless-stopped
+    depends_on:
+      grafana:
+        condition: service_healthy
+    environment:
+      GRAFANA_URL: http://grafana:3000
+      GRAFANA_USER: ${GRAFANA_USER:-admin}
+      GRAFANA_PASSWORD: ${GRAFANA_PASSWORD:-change_me_in_prod}
+      ODOO_URL: ${ODOO_URL:-http://odoo:8069}
+      ODOO_DB: ${ODOO_DB:-}
+      ODOO_EMAIL: ${ODOO_EMAIL:-}
+      ODOO_API_KEY: ${ODOO_API_KEY:-}
+      ODOO_TEAM: ${ODOO_TEAM:-Minigrid O&M}
+      ODOO_PROJECT: ${ODOO_PROJECT:-Minigrid O&M}
+      SYNC_INTERVAL_SEC: ${SYNC_INTERVAL_SEC:-60}
+      TZ: ${TZ:-Africa/Lagos}
+    networks:
+      - mog_net
+
+  # ---------------------------------------------------------------------------
+  # 定时备份：周期性 pg_dump + 保留轮转
+  # 角色：对应 JD 的备份与恢复责任，以及季度恢复演练 KPI
+  # ---------------------------------------------------------------------------
+  backup:
+    image: timescale/timescaledb:latest-pg16
+    container_name: mog-backup
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    environment:
+      DB_HOST: timescaledb
+      DB_NAME: ${POSTGRES_DB:-minigrid}
+      DB_USER: ${POSTGRES_USER:-ops}
+      PGPASSWORD: ${POSTGRES_PASSWORD:-change_me_in_prod}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-6}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      TZ: ${TZ:-Africa/Lagos}
+    volumes:
+      - backups:/backups
+      - ./scripts:/scripts:ro
+    entrypoint: ["/bin/bash", "/scripts/backup_loop.sh"]
+    networks:
+      - mog_net
+
+  # ---------------------------------------------------------------------------
+  # 平台自身 IT 层监控：Prometheus + Docker 指标导出器
+  # 采集容器 CPU/内存/网络/存活状态与引擎资源，供 Grafana「Host & Containers」看板
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: mog-prometheus
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PROM_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - mog_net
+
+  docker-exporter:
+    build:
+      context: ./services/docker_exporter
+      dockerfile: Dockerfile
+    container_name: mog-docker-exporter
+    restart: unless-stopped
+    environment:
+      DOCKER_SOCKET: /var/run/docker.sock
+      LISTEN_PORT: "9105"
+      TZ: ${TZ:-Africa/Lagos}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - mog_net
+
+  # ---------------------------------------------------------------------------
+  # 连通性探测：blackbox 以 TCP 探测站点链路与云平台端点（站点连通性健康）
+  # ---------------------------------------------------------------------------
+  blackbox-exporter:
+    image: prom/blackbox-exporter:latest
+    container_name: mog-blackbox
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/blackbox.yml:/etc/blackbox_exporter/config.yml:ro
+    command: ["--config.file=/etc/blackbox_exporter/config.yml"]
+    networks:
+      - mog_net
+
+  # ---------------------------------------------------------------------------
+  # WireGuard VPN 网关：站点远程接入通道（对应 JD: VPN (WireGuard) R/A）
+  # Web 管理界面 http://localhost:51821，VPN 端口 51820/udp
+  # ---------------------------------------------------------------------------
+  wireguard:
+    image: weejewel/wg-easy:latest
+    container_name: mog-wireguard
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      WG_HOST: ${WG_HOST:-replace_with_public_ip}
+      PASSWORD: ${WG_PASSWORD:-Saba@VPN2025}
+      WG_DEFAULT_DNS: 1.1.1.1
+      TZ: ${TZ:-Africa/Lagos}
+    volumes:
+      - wireguard_data:/etc/wireguard
+    ports:
+      - "51820:51820/udp"
+      - "${WG_UI_PORT:-51821}:51821/tcp"
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    networks:
+      - mog_net
+
+  # ---------------------------------------------------------------------------
+  # Odoo 独立数据库：Odoo 要求自己的 PostgreSQL，与 TimescaleDB 分离
+  # ---------------------------------------------------------------------------
+  odoo-db:
+    image: postgres:16
+    container_name: mog-odoo-db
+    # 本地 Odoo 设为可选（profile local-odoo）：当前演示期统一使用云端企业版，
+    # docker compose up -d 不会启动本服务；需要本地 Odoo 时:
+    #   docker compose --profile local-odoo up -d
+    profiles: ["local-odoo"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${ODOO_DB_USER:-odoo}
+      POSTGRES_PASSWORD: ${ODOO_DB_PASSWORD:-odoo_db_change_me}
+      POSTGRES_DB: postgres
+    volumes:
+      - odoo_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${ODOO_DB_USER:-odoo}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - biz_zone
+
+  # ---------------------------------------------------------------------------
+  # Odoo：ERP / Helpdesk（工单、SLA、备件库存）
+  # 对应 JD：Odoo 管理、库存数据治理、告警 → 工单闭环
+  # 版本：18.0 LTS（官方长期支持至 2027-10，生产推荐；20.0 刚发布不用于生产）
+  # 首次启动：浏览器打开 http://localhost:8069 创建数据库（勾选 Helpdesk、Inventory）
+  # ---------------------------------------------------------------------------
+  odoo:
+    image: odoo:18.0
+    container_name: mog-odoo
+    profiles: ["local-odoo"]
+    restart: unless-stopped
+    depends_on:
+      odoo-db:
+        condition: service_healthy
+    environment:
+      HOST: odoo-db
+      USER: ${ODOO_DB_USER:-odoo}
+      PASSWORD: ${ODOO_DB_PASSWORD:-odoo_db_change_me}
+      TZ: ${TZ:-Africa/Lagos}
+    volumes:
+      - odoo_data:/var/lib/odoo
+    ports:
+      - "${ODOO_PORT:-8069}:8069"
+    networks:
+      - biz_zone
+
+volumes:
+  tsdb_data:
+  prometheus_data:
+  wireguard_data:
+  grafana_data:
+  collector_hb:
+  backups:
+  odoo_db_data:
+  odoo_data:
+
+networks:
+  mog_net:
+    driver: bridge
+  # IEC 62443 分区示意：业务系统（Odoo）与监控网络分离
+  biz_zone:
+    driver: bridge

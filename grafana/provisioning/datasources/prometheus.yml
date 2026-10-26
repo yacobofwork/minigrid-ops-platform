@@ -1,0 +1,16 @@
+# =============================================================================
+# Grafana 数据源自动加载 — Prometheus（平台自身 IT 层监控）
+# 与 TimescaleDB 数据源（uid=TimescaleDB，业务遥测）并存
+# =============================================================================
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: false
+    editable: true
+    jsonData:
+      timeInterval: 15s

@@ -1,0 +1,98 @@
+{
+  "uid": "minigrid-site-devices",
+  "title": "Mini-Grid O&M · 站点设备总览 (Site Devices: PV / Battery / Genset / Transformer)",
+  "tags": ["minigrid", "devices"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] },
+        "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+        "definition": "SELECT DISTINCT site_id FROM telemetry ORDER BY site_id",
+        "includeAll": true, "label": "站点 Site", "multi": true,
+        "name": "site",
+        "query": "SELECT DISTINCT site_id FROM telemetry ORDER BY site_id",
+        "refresh": 1, "type": "query"
+      },
+      {
+        "current": { "selected": true, "text": ["All"], "value": ["$__all"] },
+        "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+        "definition": "SELECT DISTINCT device_id FROM telemetry ORDER BY device_id",
+        "includeAll": true, "label": "设备 Device", "multi": true,
+        "name": "device",
+        "query": "SELECT DISTINCT device_id FROM telemetry ORDER BY device_id",
+        "refresh": 1, "type": "query"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "光伏出力 (PV Output Now)",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT COALESCE(sum(power_kw),0) FROM telemetry WHERE device_id = 'PV-01' AND ts > now() - interval '1 min' AND site_id IN ($site)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "kwatt", "decimals": 1, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "dark-blue", "value": null }, { "color": "yellow", "value": 1 }, { "color": "orange", "value": 30 } ] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
+    },
+    {
+      "id": 2, "type": "stat", "title": "储能充放功率 (Battery Charge / Discharge · +Charge / -Discharge)",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT COALESCE(avg(power_kw),0) FROM telemetry WHERE device_id = 'BAT-01' AND ts > now() - interval '1 min' AND site_id IN ($site)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "kwatt", "decimals": 1, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "orange", "value": null }, { "color": "green", "value": 0 } ] }, "mappings": [ { "type": "value", "options": { "-1": { "text": "放电" } } } ] }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
+    },
+    {
+      "id": 3, "type": "stat", "title": "柴发出力 (Genset Output)",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT COALESCE(sum(power_kw),0) FROM telemetry WHERE device_id = 'GEN-01' AND ts > now() - interval '1 min' AND site_id IN ($site)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "kwatt", "decimals": 1, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 10 } ] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "变压器负载 (Transformer Load)",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT COALESCE(sum(power_kw),0) FROM telemetry WHERE device_id = 'TR-01' AND ts > now() - interval '1 min' AND site_id IN ($site)", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "kwatt", "decimals": 1, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null } ] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "各设备功率对比 (Power by Device · 站点/设备)",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "time_series", "rawQuery": true, "rawSql": "SELECT ts AS \"time\", site_id || '/' || device_id AS metric, power_kw AS value FROM telemetry WHERE $__timeFilter(ts) AND site_id IN ($site) AND device_id IN ($device) ORDER BY ts", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "kwatt", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 8, "lineWidth": 2, "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "电池 SOC 趋势 (Battery SOC Trend)",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "time_series", "rawQuery": true, "rawSql": "SELECT ts AS \"time\", site_id AS metric, soc_pct AS value FROM telemetry WHERE $__timeFilter(ts) AND device_id = 'BAT-01' AND site_id IN ($site) ORDER BY ts", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 7, "type": "timeseries", "title": "设备温度对比 (Temperature by Device)",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 13 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "time_series", "rawQuery": true, "rawSql": "SELECT ts AS \"time\", site_id || '/' || device_id AS metric, temp_c AS value FROM telemetry WHERE $__timeFilter(ts) AND site_id IN ($site) AND device_id IN ($device) ORDER BY ts", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "celsius", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 5, "lineWidth": 2, "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 8, "type": "table", "title": "设备实时状态 (Device Live Status)",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 13 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT DISTINCT ON (site_id, device_id) site_id AS \"站点\", device_id AS \"设备\", ts AS \"最近上报\", power_kw AS \"功率 kW\", voltage_v AS \"电压 V\", current_a AS \"电流 A\", temp_c AS \"温度 C\", soc_pct AS \"SOC %\", fault_code AS \"故障码\" FROM telemetry WHERE site_id IN ($site) AND device_id IN ($device) AND ts > now() - interval '10 min' ORDER BY site_id, device_id, ts DESC", "refId": "A" }],
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } }, "overrides": [] },
+      "options": { "showHeader": true }
+    }
+  ]
+}

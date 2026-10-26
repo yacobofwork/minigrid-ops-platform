@@ -1,0 +1,79 @@
+{
+  "uid": "minigrid-platform-health",
+  "title": "Mini-Grid O&M · 运维平台自身健康 (Platform Health)",
+  "tags": ["minigrid", "health"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "采集写入速率 (Ingest Rate · rows/min)",
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT count(*) / 5.0 FROM telemetry WHERE ts > now() - interval '5 min'", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 6 }, { "color": "green", "value": 30 } ] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
+    },
+    {
+      "id": 2, "type": "bargauge", "title": "数据新鲜度 · 各站点 (Data Freshness per Site)",
+      "gridPos": { "h": 5, "w": 9, "x": 6, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT site_id AS metric, EXTRACT(EPOCH FROM (now() - max(ts))) AS value FROM telemetry GROUP BY site_id ORDER BY site_id", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 30 }, { "color": "red", "value": 90 } ] } }, "overrides": [] },
+      "options": { "displayMode": "gradient", "minVizHeight": 10, "minVizWidth": 0, "namePlacement": "auto", "orientation": "horizontal", "showUnfilled": true, "sizing": "auto", "valueMode": "color" }
+    },
+    {
+      "id": 3, "type": "stat", "title": "最近备份成功 (Last Backup OK)",
+      "gridPos": { "h": 5, "w": 5, "x": 15, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT EXTRACT(EPOCH FROM (now() - max(ts))) FROM backup_log WHERE status = 'success'", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 2700 } ] }, "mappings": [ { "type": "special", "options": { "match": "null", "result": { "text": "No backup 无备份", "color": "red" } } } ] }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
+    },
+    {
+      "id": 4, "type": "stat", "title": "备份失败次数 (Backup Failures · 7d)",
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT count(*) FROM backup_log WHERE status <> 'success' AND ts > now() - interval '7 days'", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "写入速率趋势 (Ingest Rate Trend · 5min buckets)",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "time_series", "rawQuery": true, "rawSql": "SELECT time_bucket('5 minutes', ts) AS \"time\", count(*)::float AS value FROM telemetry WHERE $__timeFilter(ts) GROUP BY time_bucket('5 minutes', ts) ORDER BY \"time\"", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 15, "lineWidth": 2, "showPoints": "never", "spanNulls": true, "axisLabel": "rows / 5min" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "hidden", "placement": "bottom", "showLegend": false }, "tooltip": { "mode": "single", "sort": "none" } }
+    },
+    {
+      "id": 6, "type": "timeseries", "title": "设备温度监控 (Device Temperature · OT Layer)",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "time_series", "rawQuery": true, "rawSql": "SELECT ts AS \"time\", site_id AS metric, temp_c AS value FROM telemetry WHERE $__timeFilter(ts) ORDER BY ts", "refId": "A" }],
+      "fieldConfig": { "defaults": { "unit": "celsius", "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 8, "lineWidth": 2, "showPoints": "never", "spanNulls": true } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "id": 7, "type": "table", "title": "备份历史 (Backup History)",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 14 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [{ "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT ts AS \"时间 Time\", file_name AS \"备份文件 File\", file_size AS \"大小 Size\", status AS \"状态 Status\" FROM backup_log ORDER BY ts DESC LIMIT 10", "refId": "A" }],
+      "fieldConfig": { "defaults": { "custom": { "align": "auto", "cellOptions": { "type": "auto" } } }, "overrides": [] },
+      "options": { "showHeader": true }
+    },
+    {
+      "id": 8, "type": "stat", "title": "时序库总行数 (TimescaleDB Total Rows) / 数据库大小 (DB Size)",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 14 },
+      "datasource": { "type": "postgres", "uid": "TimescaleDB" },
+      "targets": [
+        { "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT 'total_rows' AS metric, count(*)::float AS value FROM telemetry", "refId": "A" },
+        { "datasource": { "type": "postgres", "uid": "TimescaleDB" }, "format": "table", "rawQuery": true, "rawSql": "SELECT 'db_size_bytes' AS metric, pg_database_size(current_database())::float AS value", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "blue", "value": null } ] } }, "overrides": [ { "matcher": { "id": "byName", "options": "value {metric=\"db_size_bytes\"}" }, "properties": [ { "id": "unit", "value": "bytes" } ] } ] },
+      "options": { "colorMode": "value", "graphMode": "area", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } }
+    }
+  ]
+}

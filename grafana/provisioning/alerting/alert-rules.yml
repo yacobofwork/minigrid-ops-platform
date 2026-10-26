@@ -1,0 +1,359 @@
+# =============================================================================
+# Mini-Grid O&M — 告警规则（按 JD 分级：P1 critical / P2 warning / P3 info）
+# -----------------------------------------------------------------------------
+# OT 设备层（TimescaleDB）：
+#   P1  站点数据中断     —— 超过 2 分钟无遥测（"监控丢失"级 P1）
+#   P2  设备故障码       —— 逆变器 fault_code（过温等）
+#   P2  储能低电量       —— SOC < 20%，柴发即将顶上（运营风险）
+# IT 平台层（Prometheus / TimescaleDB）：
+#   P1  站点/云服务失联   —— blackbox TCP 探测失败（Odoo云端/SMTP/VPN出口）
+#   P1  核心容器退出     —— timescaledb / grafana / collector 任一停止
+#   P2  普通容器退出     —— 其余容器停止
+#   P2  备份停滞         —— 1 小时内无新遥测写入（旁证备份链路异常）
+#   P2  磁盘水位        —— 根分区使用率 > 85%
+#   P3  内存水位        —— 宿主机内存 > 90%（趋势提示）
+# =============================================================================
+apiVersion: 1
+
+groups:
+  # ================================================================ OT 层 ==
+  - orgId: 1
+    name: minigrid-site-alerts
+    folder: Mini-Grid O&M Alerts
+    interval: 30s
+    rules:
+      # --- P1: 站点数据中断（监控丢失）----------------------------------
+      - uid: site-data-stale
+        title: "[P1] Site data stale — monitoring gap"
+        condition: C
+        for: 1m
+        annotations:
+          summary: >-
+            No telemetry received for over 2 minutes.
+            Platform P1 criteria met (monitoring loss).
+          runbook_url: runbooks/vpn-recovery.md
+        labels:
+          severity: critical
+          layer: ot
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: TimescaleDB
+            model:
+              format: time_series
+              rawQuery: true
+              rawSql: >-
+                SELECT now() AS "time",
+                       (SELECT EXTRACT(EPOCH FROM (now() - max(ts)))
+                        FROM telemetry) AS "staleness_seconds"
+              intervalMs: 30000
+              maxDataPoints: 60
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [120] }
+
+      # --- P2: 设备故障码 ------------------------------------------------
+      - uid: site-device-fault
+        title: "[P2] Inverter fault code reported"
+        condition: C
+        for: 0m
+        annotations:
+          summary: >-
+            Fault codes captured in telemetry within the last 5 minutes
+            (e.g. over-temperature). Check device panel for details.
+          runbook_url: runbooks/incident-response.md
+        labels:
+          severity: warning
+          layer: ot
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: TimescaleDB
+            model:
+              format: time_series
+              rawQuery: true
+              rawSql: >-
+                SELECT now() AS "time",
+                       (SELECT count(*) FROM telemetry
+                        WHERE ts > now() - interval '5 minutes'
+                          AND fault_code IS NOT NULL) AS "fault_count"
+              intervalMs: 30000
+              maxDataPoints: 60
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # --- P2: 储能低电量 ------------------------------------------------
+      - uid: site-battery-low
+        title: "[P2] Battery SOC below 20%"
+        condition: C
+        for: 5m
+        annotations:
+          summary: >-
+            Battery state of charge under 20% for 5 minutes —
+            diesel generator is carrying the load. Watch fuel autonomy.
+          runbook_url: runbooks/incident-response.md
+        labels:
+          severity: warning
+          layer: ot
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: TimescaleDB
+            model:
+              format: time_series
+              rawQuery: true
+              rawSql: >-
+                SELECT now() AS "time",
+                       (SELECT soc FROM telemetry
+                        WHERE device_id = 'BAT-01' AND soc IS NOT NULL
+                        ORDER BY ts DESC LIMIT 1) AS "soc"
+              intervalMs: 30000
+              maxDataPoints: 60
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: lt, params: [20] }
+
+  # ================================================================ IT 层 ==
+  - orgId: 1
+    name: minigrid-platform-alerts
+    folder: Mini-Grid O&M Alerts
+    interval: 1m
+    rules:
+      # --- P1: 站点/云服务失联（blackbox TCP 探测）-----------------------
+      - uid: platform-probe-down
+        title: "[P1] Connectivity probe failed — {{ $labels.instance }}"
+        condition: C
+        for: 2m
+        annotations:
+          summary: >-
+            TCP probe to {{ $labels.instance }} failing for 2 minutes.
+            P1 criteria: loss of Odoo / SMTP / site connectivity.
+          runbook_url: runbooks/vpn-recovery.md
+        labels:
+          severity: critical
+          layer: it
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: Prometheus
+            model:
+              expr: min_over_time(probe_success[2m]) == 0
+              format: time_series
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # --- P1: 核心容器退出 ----------------------------------------------
+      - uid: platform-core-container-down
+        title: "[P1] Core container stopped — {{ $labels.name }}"
+        condition: C
+        for: 1m
+        annotations:
+          summary: >-
+            Core platform container {{ $labels.name }} is down.
+            P1 criteria: loss of monitoring or database.
+          runbook_url: runbooks/server-rebuild.md
+        labels:
+          severity: critical
+          layer: it
+        data:
+          - refId: A
+            relativeTimeRange: { from: 120, to: 0 }
+            datasourceUid: Prometheus
+            model:
+              expr: >-
+                docker_container_up{name=~"timescaledb|grafana|collector|mog-timescaledb|mog-grafana|mog-collector"} == 0
+              format: time_series
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # --- P2: 普通容器退出 ----------------------------------------------
+      - uid: platform-any-container-down
+        title: "[P2] Container stopped — {{ $labels.name }}"
+        condition: C
+        for: 3m
+        annotations:
+          summary: >-
+            Container {{ $labels.name }} down for 3 minutes.
+            Non-core service — handle next working day if load allows.
+          runbook_url: runbooks/server-rebuild.md
+        labels:
+          severity: warning
+          layer: it
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: Prometheus
+            model:
+              expr: docker_container_up == 0
+              format: time_series
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # --- P2: 磁盘水位（Docker 磁盘占用 > 20GB）-------------------------
+      - uid: platform-disk-high
+        title: "[P2] Docker disk usage above 20 GB"
+        condition: C
+        for: 5m
+        annotations:
+          summary: >-
+            Docker disk usage above 20 GB — check log rotation and
+            TimescaleDB retention policy.
+          runbook_url: runbooks/server-rebuild.md
+        labels:
+          severity: warning
+          layer: it
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: Prometheus
+            model:
+              expr: docker_engine_disk_usage_bytes > 20000000000
+              format: time_series
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # --- P3: 内存水位（容器内存合计占宿主机 > 80%）---------------------
+      - uid: platform-memory-high
+        title: "[P3] Container memory above 80% of host"
+        condition: C
+        for: 10m
+        annotations:
+          summary: >-
+            Sum of container memory above 80% of host memory for
+            10 minutes — trend advisory only. Review container limits.
+          runbook_url: runbooks/server-rebuild.md
+        labels:
+          severity: info
+          layer: it
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: Prometheus
+            model:
+              expr: >-
+                (sum(docker_container_memory_usage_bytes) /
+                 docker_engine_memory_bytes) * 100 > 80
+              format: time_series
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+
+      # --- P2: 应用层故障（TCP 通但 HTTP 不健康）-------------------------
+      - uid: platform-probe-http-fail
+        title: "[P2] HTTP probe unhealthy — {{ $labels.instance }}"
+        condition: C
+        for: 5m
+        annotations:
+          summary: >-
+            HTTP probe to {{ $labels.instance }} failing for 5 minutes
+            (TCP reachable but application not responding correctly).
+            P2: service degraded, not connectivity loss.
+          runbook_url: runbooks/vpn-recovery.md
+        labels:
+          severity: warning
+          layer: it
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: Prometheus
+            model:
+              expr: min_over_time(probe_success{job="blackbox-http"}[5m]) == 0
+              format: time_series
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+
+      # --- P3: TLS 证书 14 天内到期 ---------------------------------------
+      - uid: platform-cert-expiring
+        title: "[P3] TLS certificate expiring — {{ $labels.instance }}"
+        condition: C
+        for: 0m
+        annotations:
+          summary: >-
+            TLS certificate for {{ $labels.instance }} expires within
+            14 days. Renew before expiry to avoid connectivity loss.
+          runbook_url: runbooks/server-rebuild.md
+        labels:
+          severity: info
+          layer: it
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: Prometheus
+            model:
+              expr: probe_ssl_earliest_cert_expiry - time() < 14 * 86400
+              format: time_series
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: { type: gt, params: [0] }

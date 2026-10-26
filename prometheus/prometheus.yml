@@ -1,0 +1,54 @@
+# =============================================================================
+# Prometheus 抓取配置 — 采集运维平台自身（主机/容器）指标
+# =============================================================================
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Docker 引擎 + 各容器 CPU/内存/网络/状态（自研 exporter，走 docker.sock）
+  # Docker Desktop 的 stats API 较慢，单独放宽抓取超时
+  - job_name: docker
+    scrape_interval: 30s
+    scrape_timeout: 25s
+    static_configs:
+      - targets: ["docker-exporter:9105"]
+
+  # 连通性探测：经 blackbox 以 TCP 探测站点链路/云平台端点
+  - job_name: blackbox-tcp
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    static_configs:
+      - targets:
+          - saba-test.odoo.com:443
+          - smtp.gmail.com:587
+          - www.starlink.com:443
+          - one.one.one.one:443
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  # 应用层探测：经 blackbox 发真实 HTTP 请求（端口通但应用挂了能抓到）
+  - job_name: blackbox-http
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - https://saba-test.odoo.com
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115

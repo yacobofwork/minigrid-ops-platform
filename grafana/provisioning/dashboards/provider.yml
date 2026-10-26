@@ -1,0 +1,29 @@
+# =============================================================================
+# Grafana 看板自动加载 — 按域分文件夹
+#   光伏电站 Plant Monitoring : dashboards/plant/ 下的看板
+#   运维系统 Platform Ops     : dashboards/platform/ 下的看板
+# =============================================================================
+apiVersion: 1
+
+providers:
+  - name: Plant Monitoring
+    orgId: 1
+    folder: "光伏电站 Plant Monitoring"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/plant
+      foldersFromFilesStructure: false
+
+  - name: Platform Ops
+    orgId: 1
+    folder: "运维系统 Platform Ops"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards/platform
+      foldersFromFilesStructure: false
